@@ -151,7 +151,12 @@ fn set_key_from_ptr(
 /// Stage a new "next self" key. Call `he_expresslane_promote_self_key` once
 /// the peer has acknowledged the rotation to make it the active send key.
 /// Safe to call concurrently with `he_expresslane_encrypt` on the same
-/// session. Returns `HE_EXPRESSLANE_ERR_INVALID_KEY` for an all-zero key.
+/// session.
+///
+/// An all-zero key is accepted and staged like any other: it is
+/// lightway-core's degrade notice, and promoting it clears
+/// `he_expresslane_has_valid_keys` instead of leaving the previous key
+/// trusted forever - see `he_expresslane_promote_self_key`.
 ///
 /// # Safety
 /// `session` must be a valid non-null pointer. `key` must point to 32
@@ -167,6 +172,10 @@ pub unsafe extern "C" fn he_expresslane_set_next_self_key(
 /// Promote the staged "next self" key to the active send key. A no-op if
 /// no key is staged. Safe to call concurrently with `he_expresslane_encrypt`
 /// on the same session.
+///
+/// Promoting the all-zero sentinel (a degrade notice's key) clears
+/// `he_expresslane_has_valid_keys` instead of setting it, so the session
+/// never reports itself usable under a publicly known key.
 ///
 /// # Safety
 /// `session` must be a valid non-null pointer or null.
@@ -299,8 +308,12 @@ pub unsafe extern "C" fn he_expresslane_encrypt(
 
 /// Install a new peer (receive) key. The previous peer key becomes the
 /// fallback used by `he_expresslane_decrypt` for packets still in flight
-/// from before the peer's rotation. Returns
-/// `HE_EXPRESSLANE_ERR_INVALID_KEY` for an all-zero key.
+/// from before the peer's rotation.
+///
+/// An all-zero key is accepted and installed like any other: it is
+/// lightway-core's degrade notice, and installing it immediately clears
+/// `he_expresslane_has_valid_keys` instead of leaving the previous key
+/// trusted forever.
 ///
 /// The lock-taking receive-side calls (`he_expresslane_decrypt`, this
 /// function, `he_expresslane_packets_received`) are serialized internally per
@@ -667,6 +680,68 @@ mod tests {
 
         assert_eq!(
             unsafe { he_expresslane_set_peer_key(session, key.as_ptr()) },
+            he_expresslane_return_code_t::HE_EXPRESSLANE_SUCCESS
+        );
+        assert!(unsafe { he_expresslane_has_valid_keys(session) });
+
+        unsafe { he_expresslane_session_destroy(session) };
+    }
+
+    /// A degrade notice stages the all-zero sentinel key. It must install
+    /// (SUCCESS, not ERR_INVALID_KEY - rejecting it would leave an offloaded
+    /// path trusting a key lightway-core has already declared dead) and
+    /// promoting it must defeat has_valid_keys rather than set it. A later
+    /// real key restores the session.
+    #[test]
+    fn sentinel_self_key_staged_and_promoted_defeats_has_valid_keys() {
+        let session = unsafe { he_expresslane_session_create(2) };
+        let real = [1u8; 32];
+        let sentinel = [0u8; 32];
+
+        unsafe { he_expresslane_set_next_self_key(session, real.as_ptr()) };
+        unsafe { he_expresslane_promote_self_key(session) };
+        unsafe { he_expresslane_set_peer_key(session, real.as_ptr()) };
+        assert!(unsafe { he_expresslane_has_valid_keys(session) });
+
+        assert_eq!(
+            unsafe { he_expresslane_set_next_self_key(session, sentinel.as_ptr()) },
+            he_expresslane_return_code_t::HE_EXPRESSLANE_SUCCESS
+        );
+        unsafe { he_expresslane_promote_self_key(session) };
+        assert!(!unsafe { he_expresslane_has_valid_keys(session) }, "all-zero self key must not count");
+
+        assert_eq!(
+            unsafe { he_expresslane_set_next_self_key(session, real.as_ptr()) },
+            he_expresslane_return_code_t::HE_EXPRESSLANE_SUCCESS
+        );
+        unsafe { he_expresslane_promote_self_key(session) };
+        assert!(unsafe { he_expresslane_has_valid_keys(session) });
+
+        unsafe { he_expresslane_session_destroy(session) };
+    }
+
+    /// Same contract on the peer (receive) side: installing the all-zero
+    /// sentinel is SUCCESS and takes effect immediately (no promote step for
+    /// peer keys), and a later real key restores the session.
+    #[test]
+    fn sentinel_peer_key_defeats_has_valid_keys() {
+        let session = unsafe { he_expresslane_session_create(2) };
+        let real = [1u8; 32];
+        let sentinel = [0u8; 32];
+
+        unsafe { he_expresslane_set_next_self_key(session, real.as_ptr()) };
+        unsafe { he_expresslane_promote_self_key(session) };
+        unsafe { he_expresslane_set_peer_key(session, real.as_ptr()) };
+        assert!(unsafe { he_expresslane_has_valid_keys(session) });
+
+        assert_eq!(
+            unsafe { he_expresslane_set_peer_key(session, sentinel.as_ptr()) },
+            he_expresslane_return_code_t::HE_EXPRESSLANE_SUCCESS
+        );
+        assert!(!unsafe { he_expresslane_has_valid_keys(session) }, "all-zero peer key must not count");
+
+        assert_eq!(
+            unsafe { he_expresslane_set_peer_key(session, real.as_ptr()) },
             he_expresslane_return_code_t::HE_EXPRESSLANE_SUCCESS
         );
         assert!(unsafe { he_expresslane_has_valid_keys(session) });

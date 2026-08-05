@@ -148,7 +148,12 @@ uint64_t he_expresslane_reserve_counter(const he_expresslane_session_t *session)
  Stage a new "next self" key. Call `he_expresslane_promote_self_key` once
  the peer has acknowledged the rotation to make it the active send key.
  Safe to call concurrently with `he_expresslane_encrypt` on the same
- session. Returns `HE_EXPRESSLANE_ERR_INVALID_KEY` for an all-zero key.
+ session.
+
+ An all-zero key is accepted and staged like any other: it is
+ lightway-core's degrade notice, and promoting it clears
+ `he_expresslane_has_valid_keys` instead of leaving the previous key
+ trusted forever - see `he_expresslane_promote_self_key`.
 
  # Safety
  `session` must be a valid non-null pointer. `key` must point to 32
@@ -161,6 +166,10 @@ he_expresslane_return_code_t he_expresslane_set_next_self_key(const he_expressla
  Promote the staged "next self" key to the active send key. A no-op if
  no key is staged. Safe to call concurrently with `he_expresslane_encrypt`
  on the same session.
+
+ Promoting the all-zero sentinel (a degrade notice's key) clears
+ `he_expresslane_has_valid_keys` instead of setting it, so the session
+ never reports itself usable under a publicly known key.
 
  # Safety
  `session` must be a valid non-null pointer or null.
@@ -220,8 +229,12 @@ he_expresslane_return_code_t he_expresslane_encrypt(const he_expresslane_session
 /*
  Install a new peer (receive) key. The previous peer key becomes the
  fallback used by `he_expresslane_decrypt` for packets still in flight
- from before the peer's rotation. Returns
- `HE_EXPRESSLANE_ERR_INVALID_KEY` for an all-zero key.
+ from before the peer's rotation.
+
+ An all-zero key is accepted and installed like any other: it is
+ lightway-core's degrade notice, and installing it immediately clears
+ `he_expresslane_has_valid_keys` instead of leaving the previous key
+ trusted forever.
 
  The lock-taking receive-side calls (`he_expresslane_decrypt`, this
  function, `he_expresslane_packets_received`) are serialized internally per
