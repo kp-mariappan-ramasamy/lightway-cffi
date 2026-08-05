@@ -31,10 +31,15 @@ impl From<lightway_expresslane::ExpresslaneError> for he_expresslane_return_code
         match e {
             E::InsufficientData => Self::HE_EXPRESSLANE_ERR_INSUFFICIENT_DATA,
             E::BufferTooSmall => Self::HE_EXPRESSLANE_ERR_BUFFER_TOO_SMALL,
-            E::InvalidData => Self::HE_EXPRESSLANE_ERR_INVALID_DATA,
             E::Replayed => Self::HE_EXPRESSLANE_ERR_REPLAYED,
-            E::KeyNotSet => Self::HE_EXPRESSLANE_ERR_KEY_NOT_SET,
-            E::InvalidKey => Self::HE_EXPRESSLANE_ERR_INVALID_KEY,
+            E::NoKey => Self::HE_EXPRESSLANE_ERR_KEY_NOT_SET,
+            // The fork's single InvalidData covered auth failure, encrypt
+            // failure and oversize payload; the monorepo crate splits those
+            // into three variants, all mapped to the same C code.
+            E::AuthFailed | E::EncryptFailed | E::PayloadTooLarge => Self::HE_EXPRESSLANE_ERR_INVALID_DATA,
+            // The fork's single InvalidKey covered both "couldn't build the
+            // cipher" and "couldn't install the key"; same split, same target.
+            E::NewCipherFailed | E::SetKeyFailed => Self::HE_EXPRESSLANE_ERR_INVALID_KEY,
         }
     }
 }

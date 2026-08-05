@@ -16,7 +16,16 @@ unsafe_op_in_unsafe_fn = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [dependencies]
-lightway-expresslane = { path = "../lightway-expresslane" }
+# The monorepo crate, same git-dep pattern the root lightway-cffi package
+# uses for lightway-core. No features: the wolfssl backend stays off, this
+# shim ships ring.
+lightway-expresslane = { git = "https://github.com/expressvpn/lightway", branch = "expresslane-crate" }
+# Same AEAD backend the fork's own lightway-expresslane pinned; RingAead
+# (src/ring_aead.rs) implements the monorepo crate's ExpresslaneAead over it.
+ring = "0.17"
+# ExpresslaneAead::seal/open return BytesMut; matches the version the root
+# lightway-cffi package already depends on.
+bytes = "1.6.0"
 # Scrub the stack copy of raw key material after installing it into a session.
 zeroize = "1"
 

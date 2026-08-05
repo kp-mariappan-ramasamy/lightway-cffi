@@ -8,16 +8,18 @@ license = "AGPL-3.0-only"
 repository = "https://github.com/expressvpn/lightway-cffi"
 
 [workspace]
-members = ["lightway-expresslane", "lightway-expresslane-cffi"]
+members = ["lightway-expresslane-cffi"]
 # Deliberately NOT a member. Cargo resolves the whole workspace even for the
 # `cargo rustc -p <pkg>` builds lightway-cffi.cmd runs, so a bench-only
 # dependency the build machine cannot fetch would fail the *shipping* build —
 # right after `cargo clean` has wiped the artifacts. It would also add the
 # bench-only providers — `aes-gcm`, `chacha20poly1305` and their RustCrypto
-# transitives; `ring` is already here as a lightway-expresslane dependency — to
-# this Cargo.lock, which the MSRV `--locked` job consumes, and CI's four
-# `--workspace` jobs would build, test and clippy it. The bench is its own
-# workspace root with its own lock and its own target dir.
+# transitives; `ring` is already here as a lightway-expresslane-cffi
+# dependency - to this Cargo.lock, which the MSRV `--locked` job consumes,
+# and CI's four `--workspace` jobs would build, test and clippy it. The bench
+# is its own workspace root with its own lock and its own target dir; it
+# still points at the now-deleted `lightway-expresslane` path and is not
+# fixed up in this pass (excluded from the shipping build, has its own lock).
 exclude = ["lightway-expresslane-bench"]
 
 [workspace.package]

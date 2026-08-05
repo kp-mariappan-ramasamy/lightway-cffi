@@ -11,9 +11,11 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+mod ring_aead;
 pub mod types;
 
 use lightway_expresslane::{ExpresslaneSession, ExpresslaneVersion};
+use ring_aead::RingAead;
 
 pub use types::he_expresslane_return_code_t;
 
@@ -26,7 +28,7 @@ fn ffi_guard<R>(default: R, f: impl FnOnce() -> R) -> R {
 }
 
 /// Opaque ExpressLane packet-crypto session handle.
-pub struct he_expresslane_session_t(ExpresslaneSession);
+pub struct he_expresslane_session_t(ExpresslaneSession<RingAead>);
 
 /// Allocate a new ExpressLane session for the given wire version.
 ///
@@ -124,7 +126,7 @@ pub unsafe extern "C" fn he_expresslane_reserve_counter(
 fn set_key_from_ptr(
     session: *const he_expresslane_session_t,
     key: *const u8,
-    install: impl FnOnce(&ExpresslaneSession, ExpresslaneKey) -> lightway_expresslane::ExpresslaneResult<()>,
+    install: impl FnOnce(&ExpresslaneSession<RingAead>, ExpresslaneKey) -> lightway_expresslane::ExpresslaneResult<()>,
 ) -> he_expresslane_return_code_t {
     if session.is_null() || key.is_null() {
         return he_expresslane_return_code_t::HE_EXPRESSLANE_ERR_NULL_POINTER;
@@ -275,7 +277,7 @@ pub unsafe extern "C" fn he_expresslane_encrypt(
         let out_slice = unsafe { std::slice::from_raw_parts_mut(out, out_capacity) };
 
         // SAFETY: null check above; session is valid for this call.
-        let result = unsafe { &*session }.0.encrypt(
+        let result = unsafe { &*session }.0.encrypt_into(
             counter,
             session_id_bytes,
             plain_text_slice,
@@ -428,7 +430,7 @@ pub unsafe extern "C" fn he_expresslane_decrypt(
         };
 
         // SAFETY: null check above; session is valid for this call.
-        let result = unsafe { &*session }.0.decrypt(session_id_bytes, wire_slice, out_slice);
+        let result = unsafe { &*session }.0.decrypt_into(session_id_bytes, wire_slice, out_slice);
         match result {
             Ok((len, encoded)) => {
                 // SAFETY: null checks above; out_len/is_encoded are valid
@@ -451,7 +453,7 @@ pub unsafe extern "C" fn he_expresslane_decrypt(
 /// `he_expresslane_decrypt` without hardcoding the constant.
 #[unsafe(no_mangle)]
 pub extern "C" fn he_expresslane_wire_overhead() -> usize {
-    ExpresslaneSession::WIRE_OVERHEAD
+    ExpresslaneSession::<RingAead>::WIRE_OVERHEAD
 }
 
 #[cfg(test)]
@@ -495,6 +497,48 @@ mod tests {
         assert_eq!(unsafe { he_expresslane_reserve_counter(std::ptr::null()) }, 0);
     }
 
+    /// `he_expresslane_reserve_counter` and `he_expresslane_encrypt`'s
+    /// `counter` argument are decoupled by design: a caller may reserve
+    /// without encrypting, or supply its own scheme entirely (the shape an
+    /// out-of-process consumer needs to carry a counter across the FFI
+    /// boundary). Never calling reserve_counter here and passing an
+    /// arbitrary counter directly proves `encrypt` writes exactly the
+    /// counter it was given, not an internally tracked one.
+    #[test]
+    fn encrypt_counter_is_independent_of_reserve_counter() {
+        let session = unsafe { he_expresslane_session_create(2) };
+        let key = [1u8; 32];
+        unsafe { he_expresslane_set_next_self_key(session, key.as_ptr()) };
+        unsafe { he_expresslane_promote_self_key(session) };
+
+        let session_id = [1u8; 8];
+        let plain_text = b"test";
+        let iv = [0u8; 12];
+        let mut out = vec![0u8; he_expresslane_wire_overhead() + plain_text.len()];
+        let mut out_len: usize = 0;
+
+        let rc = unsafe {
+            he_expresslane_encrypt(
+                session,
+                1000,
+                session_id.as_ptr(),
+                plain_text.as_ptr(),
+                plain_text.len(),
+                iv.as_ptr(),
+                false,
+                out.as_mut_ptr(),
+                out.len(),
+                &mut out_len,
+            )
+        };
+        assert_eq!(rc, he_expresslane_return_code_t::HE_EXPRESSLANE_SUCCESS);
+        assert_eq!(u64::from_be_bytes(out[0..8].try_into().unwrap()), 1000);
+        // reserve_counter was never called, so its own sequence is untouched.
+        assert_eq!(unsafe { he_expresslane_reserve_counter(session) }, 1);
+
+        unsafe { he_expresslane_session_destroy(session) };
+    }
+
     #[test]
     fn set_next_self_key_null_pointers_return_null_pointer_error() {
         let session = unsafe { he_expresslane_session_create(2) };
@@ -523,7 +567,7 @@ mod tests {
         let session_id = [1u8; 8];
         let plain_text = b"test data";
         let iv = [0u8; 12];
-        let mut out = vec![0u8; lightway_expresslane::ExpresslaneSession::WIRE_OVERHEAD + plain_text.len()];
+        let mut out = vec![0u8; he_expresslane_wire_overhead() + plain_text.len()];
         let mut out_len: usize = 0;
 
         let counter = unsafe { he_expresslane_reserve_counter(session) };
@@ -554,7 +598,7 @@ mod tests {
         let session_id = [1u8; 8];
         let plain_text = b"test";
         let iv = [0u8; 12];
-        let mut out = vec![0u8; lightway_expresslane::ExpresslaneSession::WIRE_OVERHEAD + plain_text.len()];
+        let mut out = vec![0u8; he_expresslane_wire_overhead() + plain_text.len()];
         let mut out_len: usize = 0;
 
         let rc = unsafe {
@@ -693,7 +737,13 @@ mod tests {
     fn decrypt_without_key_returns_key_not_set() {
         let receiver = unsafe { he_expresslane_session_create(2) };
         let session_id = [1u8; 8];
-        let wire = vec![0u8; he_expresslane_wire_overhead()];
+        // Counter 0 is permanently invalid (matches lightway-core's replay
+        // window - see he_expresslane_decrypt's counter-0 handling), and the
+        // replay pre-check runs before the key lookup, so an all-zero wire
+        // buffer would return ERR_REPLAYED here instead of the KEY_NOT_SET
+        // this test is about. A non-zero counter isolates the two.
+        let mut wire = vec![0u8; he_expresslane_wire_overhead()];
+        wire[0..8].copy_from_slice(&1u64.to_be_bytes());
         let mut out = vec![0u8; 4];
         let mut out_len: usize = 0;
         let mut is_encoded = false;

@@ -531,16 +531,21 @@ dependencies = [
 [[package]]
 name = "lightway-expresslane"
 version = "0.1.0"
+source = "git+https://github.com/expressvpn/lightway?branch=expresslane-crate#9e3c03806f4e699c62fc2bd6fc29dc0a5ca09a4f"
 dependencies = [
- "ring",
+ "bitfield-struct",
+ "bytes",
+ "thiserror",
 ]
 
 [[package]]
 name = "lightway-expresslane-cffi"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "cbindgen",
  "lightway-expresslane",
+ "ring",
  "zeroize",
 ]
 
