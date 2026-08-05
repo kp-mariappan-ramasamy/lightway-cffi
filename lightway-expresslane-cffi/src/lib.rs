@@ -10,6 +10,7 @@
 #![allow(non_camel_case_types, non_upper_case_globals, clippy::upper_case_acronyms)]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod ring_aead;
 pub mod types;
@@ -28,7 +29,14 @@ fn ffi_guard<R>(default: R, f: impl FnOnce() -> R) -> R {
 }
 
 /// Opaque ExpressLane packet-crypto session handle.
-pub struct he_expresslane_session_t(ExpresslaneSession<RingAead>);
+///
+/// The second field counts successful `he_expresslane_encrypt` calls only -
+/// the C contract for `he_expresslane_packets_sent`. The underlying crate's
+/// own `packets_sent()` counts counters *reserved*, which includes ones a
+/// failed encrypt burned; that is the right metric for the crate (an
+/// offload engine reasons about wire counter usage), but not what this ABI
+/// has always promised callers, so the shim tracks it separately.
+pub struct he_expresslane_session_t(ExpresslaneSession<RingAead>, AtomicU64);
 
 /// Allocate a new ExpressLane session for the given wire version.
 ///
@@ -55,9 +63,10 @@ pub unsafe extern "C" fn he_expresslane_session_create(
         return std::ptr::null_mut();
     }
     ffi_guard(std::ptr::null_mut(), || {
-        Box::into_raw(Box::new(he_expresslane_session_t(ExpresslaneSession::new(
-            version,
-        ))))
+        Box::into_raw(Box::new(he_expresslane_session_t(
+            ExpresslaneSession::new(version),
+            AtomicU64::new(0),
+        )))
     })
 }
 
@@ -192,7 +201,11 @@ pub unsafe extern "C" fn he_expresslane_promote_self_key(
     });
 }
 
-/// Total number of packets successfully encrypted so far on this session.
+/// Total number of packets successfully encrypted so far on this session -
+/// bumped only by an `he_expresslane_encrypt` call that returns
+/// `HE_EXPRESSLANE_SUCCESS`. A counter reserved via
+/// `he_expresslane_reserve_counter` but never successfully encrypted (or
+/// never encrypted at all) does not count.
 ///
 /// # Safety
 /// `session` must be a valid non-null pointer or null.
@@ -205,7 +218,7 @@ pub unsafe extern "C" fn he_expresslane_packets_sent(
     }
     ffi_guard(0, || {
         // SAFETY: null check above; session is valid for this call.
-        unsafe { &*session }.0.packets_sent()
+        unsafe { &*session }.1.load(Ordering::Relaxed)
     })
 }
 
@@ -299,6 +312,8 @@ pub unsafe extern "C" fn he_expresslane_encrypt(
                 // SAFETY: null check above; out_len is a valid pointer to a
                 // writable usize per the function's documented contract.
                 unsafe { *out_len = written };
+                // SAFETY: null check above; session is valid for this call.
+                unsafe { &*session }.1.fetch_add(1, Ordering::Relaxed);
                 he_expresslane_return_code_t::HE_EXPRESSLANE_SUCCESS
             }
             Err(e) => e.into(),
@@ -660,6 +675,63 @@ mod tests {
             )
         };
         assert_eq!(rc, he_expresslane_return_code_t::HE_EXPRESSLANE_ERR_BUFFER_TOO_SMALL);
+        unsafe { he_expresslane_session_destroy(session) };
+    }
+
+    /// he_expresslane_packets_sent counts successful encrypts only, not
+    /// counters reserved. Mirrors the fork's own
+    /// packets_sent_counts_successful_encrypts_only.
+    #[test]
+    fn packets_sent_counts_successful_encrypts_only() {
+        let session = unsafe { he_expresslane_session_create(2) };
+        let key = [1u8; 32];
+        unsafe { he_expresslane_set_next_self_key(session, key.as_ptr()) };
+        unsafe { he_expresslane_promote_self_key(session) };
+
+        let session_id = [1u8; 8];
+        let plain_text = b"test";
+        let iv = [0u8; 12];
+        assert_eq!(unsafe { he_expresslane_packets_sent(session) }, 0);
+
+        let mut out = vec![0u8; he_expresslane_wire_overhead() + plain_text.len()];
+        let mut out_len: usize = 0;
+        let rc = unsafe {
+            he_expresslane_encrypt(
+                session,
+                1,
+                session_id.as_ptr(),
+                plain_text.as_ptr(),
+                plain_text.len(),
+                iv.as_ptr(),
+                false,
+                out.as_mut_ptr(),
+                out.len(),
+                &mut out_len,
+            )
+        };
+        assert_eq!(rc, he_expresslane_return_code_t::HE_EXPRESSLANE_SUCCESS);
+        assert_eq!(unsafe { he_expresslane_packets_sent(session) }, 1);
+
+        // A failed encrypt (buffer too small) must not bump the counter, even
+        // though it did burn a wire counter value.
+        let mut too_small = vec![0u8; 4];
+        let rc = unsafe {
+            he_expresslane_encrypt(
+                session,
+                2,
+                session_id.as_ptr(),
+                plain_text.as_ptr(),
+                plain_text.len(),
+                iv.as_ptr(),
+                false,
+                too_small.as_mut_ptr(),
+                too_small.len(),
+                &mut out_len,
+            )
+        };
+        assert_eq!(rc, he_expresslane_return_code_t::HE_EXPRESSLANE_ERR_BUFFER_TOO_SMALL);
+        assert_eq!(unsafe { he_expresslane_packets_sent(session) }, 1);
+
         unsafe { he_expresslane_session_destroy(session) };
     }
 

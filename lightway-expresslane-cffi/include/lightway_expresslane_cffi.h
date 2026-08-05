@@ -93,6 +93,13 @@ typedef uint8_t he_expresslane_version_t;
 
 /*
  Opaque ExpressLane packet-crypto session handle.
+
+ The second field counts successful `he_expresslane_encrypt` calls only -
+ the C contract for `he_expresslane_packets_sent`. The underlying crate's
+ own `packets_sent()` counts counters *reserved*, which includes ones a
+ failed encrypt burned; that is the right metric for the crate (an
+ offload engine reasons about wire counter usage), but not what this ABI
+ has always promised callers, so the shim tracks it separately.
  */
 typedef struct he_expresslane_session_t he_expresslane_session_t;
 
@@ -177,7 +184,11 @@ he_expresslane_return_code_t he_expresslane_set_next_self_key(const he_expressla
 void he_expresslane_promote_self_key(const he_expresslane_session_t *session);
 
 /*
- Total number of packets successfully encrypted so far on this session.
+ Total number of packets successfully encrypted so far on this session -
+ bumped only by an `he_expresslane_encrypt` call that returns
+ `HE_EXPRESSLANE_SUCCESS`. A counter reserved via
+ `he_expresslane_reserve_counter` but never successfully encrypted (or
+ never encrypted at all) does not count.
 
  # Safety
  `session` must be a valid non-null pointer or null.
